@@ -1,34 +1,34 @@
-package main
+// Package passkeys provides a set of structures and methods
+// for managing WebAuthn passkey authentication, user registration, and SQLite-backed
+// storage within an application.
+package passkeys
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"log"
-	"log/slog"
-	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/hesusruiz/utils/errl"
 	_ "modernc.org/sqlite"
 )
 
+// Passkeys is the primary manager for WebAuthn authentication, encapsulating the database connection,
+// the WebAuthn instance, and the session storage mechanism.
 type Passkeys struct {
-	db         *sql.DB
-	waInstance *webauthn.WebAuthn
+	db           *sql.DB
+	waInstance   *webauthn.WebAuthn
+	sessionStore *SessionStore
 }
 
+// User represents an authenticated entity within the system. It implements the
+// webauthn.User interface required for credential creation and validation.
 type User struct {
 	id          []byte
 	email       string
@@ -43,13 +43,9 @@ func (u *User) WebAuthnDisplayName() string                { return u.email }
 func (u *User) WebAuthnCredentials() []webauthn.Credential { return u.credentials }
 func (u *User) WebAuthnIcon() string                       { return "" }
 
-// --- 2. GLOBAL STATE (In-memory mocks for this example) ---
-
-var (
-	// In production, use a secure cookie for this!
-	sessionStore = make(map[string]*webauthn.SessionData)
-)
-
+// NewPasskeys initializes a new Passkeys manager. It sets up the WebAuthn
+// configuration, opens the SQLite database, executes the initial schema creation,
+// and returns the configured instance.
 func NewPasskeys() (*Passkeys, error) {
 
 	requireResidentKey := true
@@ -102,14 +98,17 @@ func NewPasskeys() (*Passkeys, error) {
 	}
 
 	passkeys := &Passkeys{
-		db:         db,
-		waInstance: waInstance,
+		db:           db,
+		waInstance:   waInstance,
+		sessionStore: NewSessionStore(),
 	}
 
 	return passkeys, nil
 
 }
 
+// GetUserByEmail looks up a user in the SQLite database by their email address.
+// It returns the User structure or an error if the user is not found.
 func (p *Passkeys) GetUserByEmail(email string) (*User, error) {
 	var u User
 	err := p.db.QueryRow("SELECT id, email FROM users WHERE email = ?", email).Scan(&u.id, &u.email)
@@ -174,6 +173,8 @@ func (p *Passkeys) GetUserWithCredentials(email string) (*User, error) {
 	return &u, nil
 }
 
+// InsertUser generates a unique 32-byte ID for a new user and inserts their
+// basic record into the database, returning the initialized User structure.
 func (p *Passkeys) InsertUser(email string) (*User, error) {
 	userID := make([]byte, 32)
 	if _, err := rand.Read(userID); err != nil {
@@ -188,6 +189,8 @@ func (p *Passkeys) InsertUser(email string) (*User, error) {
 	return &User{id: userID, email: email}, nil
 }
 
+// UpdateUserInvitationToken sets a new invitation token and its expiration
+// timestamp for a specific user's email address.
 func (p *Passkeys) UpdateUserInvitationToken(email, token string, expiry time.Time) error {
 	_, err := p.db.Exec(
 		"UPDATE users SET invitation_token = ?, token_expiry = ? WHERE email = ?",
@@ -201,6 +204,8 @@ func (p *Passkeys) UpdateUserInvitationToken(email, token string, expiry time.Ti
 	return nil
 }
 
+// GetInvitation attempts to locate a user by a valid, unexpired invitation token.
+// It returns an error if the token does not exist, is invalid, or has expired.
 func (p *Passkeys) GetInvitation(invitationToken string) (*User, error) {
 	var u User
 	var tokenExpiry sql.NullTime
@@ -230,6 +235,8 @@ func (p *Passkeys) GetInvitation(invitationToken string) (*User, error) {
 	return &u, nil
 }
 
+// DeleteInvitation removes the invitation token and its expiration from the
+// specified user's record, preventing reuse of the token.
 func (p *Passkeys) DeleteInvitation(user *User) error {
 	fmt.Printf("deleting invitation for user %s", user.email)
 	_, err := p.db.Exec(
@@ -242,6 +249,8 @@ func (p *Passkeys) DeleteInvitation(user *User) error {
 	return nil
 }
 
+// AddCredentialToUser serializes and stores a new WebAuthn credential into the
+// database, associating it with the provided user's email.
 func (p *Passkeys) AddCredentialToUser(user *User, credential *webauthn.Credential) error {
 	blob, err := json.Marshal(credential)
 	if err != nil {
@@ -262,6 +271,8 @@ func (p *Passkeys) AddCredentialToUser(user *User, credential *webauthn.Credenti
 	return nil
 }
 
+// UpdateCredential updates the stored data and signature count for an existing
+// WebAuthn credential belonging to the specified user.
 func (p *Passkeys) UpdateCredential(user *User, credential webauthn.Credential) error {
 	blob, err := json.Marshal(credential)
 	if err != nil {
@@ -280,282 +291,4 @@ func (p *Passkeys) UpdateCredential(user *User, credential webauthn.Credential) 
 		return errl.Errorf("UpdateCredential: update: %w", err)
 	}
 	return nil
-}
-
-func (p *Passkeys) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
-
-	// The user must provide the invitation invitationToken that she received via email or any other mechanism
-	invitationToken := r.URL.Query().Get("t")
-	if invitationToken == "" {
-		slog.Error("no token provided")
-		http.Error(w, "no token", http.StatusBadRequest)
-		return
-	}
-
-	// Get user from DB via invitation token
-	user, err := p.GetInvitation(invitationToken)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("error getting invitation", "error", err)
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	// Accept only ES256 or RS256
-	registrationParameters := webauthn.WithCredentialParameters([]protocol.CredentialParameter{
-		{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256}, // ES256
-		{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgRS256}, // RS256
-	})
-
-	options, session, err := p.waInstance.BeginRegistration(user, registrationParameters)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("error beginning registration", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	type response struct {
-		CredentialOptions *protocol.CredentialCreation `json:"credentialOptions"`
-		SessionID         string                       `json:"sessionid"`
-	}
-
-	resp := response{
-		CredentialOptions: options,
-		SessionID:         session.Challenge,
-	}
-
-	// Store session temporarily to verify the next request
-	sessionStore[invitationToken] = session
-	fmt.Println("SessionID in BeginRegistration", resp.SessionID)
-
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (p *Passkeys) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	invitationToken := r.URL.Query().Get("t")
-	session, ok := sessionStore[invitationToken]
-	if !ok {
-		err := errl.Errorf("token not provided or does not exist")
-		slog.Error("finishing registration", "error", err.Error())
-		http.Error(w, "session not found", http.StatusBadRequest)
-		return
-	}
-
-	fmt.Println("sessionId in FinishingRegistration", invitationToken)
-	fmt.Println("challenge in FinishingRegistration", session.Challenge)
-
-	// Get user associated with the invitation token
-	user, err := p.GetInvitation(invitationToken)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("finishing registration", "error", err)
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	credential, err := p.waInstance.FinishRegistration(user, *session, r)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("finishing registration", "error", err)
-		http.Error(w, err.Error(), 400)
-		return
-	}
-
-	// Delete the invitation
-	err = p.DeleteInvitation(user)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("error deleting the invitation", "email", user.email, "webauthn_id", user.WebAuthnID(), "error", err)
-	}
-
-	// Save the credential to SQLite
-	err = p.AddCredentialToUser(user, credential)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("finishing registration", "error", err)
-		http.Error(w, "Error saving credential: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	fmt.Printf("Successfully registered key for %s\n", user.email)
-	delete(sessionStore, invitationToken)
-	w.WriteHeader(http.StatusOK)
-}
-
-func getFileSystem() fs.FS {
-	// Set to false when deploying to production
-	useLive := true
-
-	// Get the path to this specific .go file
-	_, thisFilePath, _, ok := runtime.Caller(0)
-
-	if useLive && ok {
-		// The frontend files should be in the 'front' subdirectory
-		thisFileDir := filepath.Dir(thisFilePath)
-		// Join with the frontend folder
-		frontendPath := filepath.Join(thisFileDir, "front")
-
-		println("Development mode: Serving from", frontendPath)
-		return os.DirFS(frontendPath)
-	}
-
-	// Production: Use embedded files
-	// We use fs.Sub to strip the "front" prefix from the embed paths
-	f, _ := fs.Sub(embeddedFiles, "front")
-	return f
-}
-
-func (p *Passkeys) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	// TODO: Load front/index.html (or wherever you put the login UI)
-	// It should contain a "Login with Passkey" button
-}
-
-func (p *Passkeys) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
-
-	// Get the challenge
-	assertion, session, err := p.waInstance.BeginDiscoverableLogin()
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("finishing login", "error", err)
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	type response struct {
-		CredentialAssertion *protocol.CredentialAssertion `json:"credentialAssertion"`
-		SessionID           string                        `json:"sessionid"`
-	}
-
-	resp := response{
-		CredentialAssertion: assertion,
-		SessionID:           session.Challenge,
-	}
-
-	// Store session temporarily to verify the next request
-	sessionStore[session.Challenge] = session
-
-	// Reply to caller
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (p *Passkeys) loadUserFromPasskey(rawID []byte, userHandle []byte) (user webauthn.User, err error) {
-
-	var u User
-
-	ctx := context.Background()
-
-	// Open a read-only transaction so both queries see the same DB snapshot.
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, errl.Errorf("GetUserWithCredentials: begin tx: %w", err)
-	}
-	// A read-only transaction only needs a rollback (commit would work too, but
-	// rollback is the safe default when we might return early on error).
-	defer tx.Rollback() //nolint:errcheck
-
-	// 1. Fetch the user row.
-	err = tx.QueryRowContext(ctx,
-		`SELECT userid, email FROM users WHERE userid = ?`,
-		userHandle,
-	).Scan(&u.id, &u.email)
-	if err != nil {
-		return nil, errl.Errorf("GetUserWithCredentials: user lookup: %w", err)
-	}
-
-	// 2. Fetch all passkey credentials credentials for this user, oldest first.
-	rows, err := tx.QueryContext(ctx,
-		`SELECT public_data FROM credentials WHERE user_email = ? AND cred_type = 'passkey' ORDER BY created_at ASC`,
-		u.email,
-	)
-	if err != nil {
-		return nil, errl.Errorf("GetUserWithCredentials: credentials query: %w", err)
-	}
-	defer rows.Close()
-
-	// 3. Deserialize each credential from its JSON blob.
-	for rows.Next() {
-		var blob []byte
-		if err := rows.Scan(&blob); err != nil {
-			return nil, errl.Errorf("GetUserWithCredentials: scan: %w", err)
-		}
-		var cred webauthn.Credential
-		if err := json.Unmarshal(blob, &cred); err != nil {
-			return nil, errl.Errorf("GetUserWithCredentials: unmarshal: %w", err)
-		}
-		u.credentials = append(u.credentials, cred)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, errl.Errorf("GetUserWithCredentials: rows: %w", err)
-	}
-
-	return &u, nil
-
-}
-
-func (p *Passkeys) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
-	sessionId := r.URL.Query().Get("s")
-	session, ok := sessionStore[sessionId]
-	if !ok {
-		err := errl.Errorf("token not provided or does not exist")
-		slog.Error("finishing login", "error", err.Error())
-		http.Error(w, "session not found", http.StatusBadRequest)
-		return
-	}
-
-	fmt.Println("sessionId in FinishingLogin", sessionId)
-	fmt.Println("challenge in FinishingLogin", session.Challenge)
-
-	validatedUser, validatedCredential, err := p.waInstance.FinishPasskeyLogin(p.loadUserFromPasskey, *session, r)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("finishing login", "error", err)
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	// This type assertion is necessary to perform the necessary updates.
-	user, ok := validatedUser.(*User)
-	if !ok {
-		err = errl.Error(err)
-		slog.Error("finishing login", "error", err)
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	var found bool
-
-	// Modify the matching credential in the user struct which is critical for proper future validations as the
-	// metadata for this credential has been updated. No type assertion is required here since the LoadUser function
-	// returns the concrete implementation, you may have to adjust this if you return the abstract implementation
-	// instead.
-	for i, credential := range user.credentials {
-		if bytes.Equal(validatedCredential.ID, credential.ID) {
-			user.credentials[i] = *validatedCredential
-
-			// Crude / Abstract example of saving the user with their updated credentials. This is critical for
-			// proper future validations.
-			if err = p.UpdateCredential(user, user.credentials[i]); err != nil {
-				err = errl.Error(err)
-				slog.Error("finishing login", "error", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			found = true
-
-			break
-		}
-	}
-
-	// Should error if we can't update the credentials for the user.
-	if !found {
-		err = errl.Error(err)
-		slog.Error("credential not found for update", "error", err)
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-
 }

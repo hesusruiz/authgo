@@ -1,4 +1,4 @@
-package main
+package passkeys
 
 import (
 	"crypto/rand"
@@ -12,11 +12,15 @@ import (
 	"github.com/hesusruiz/utils/errl"
 )
 
-func (p *Passkeys) ConfigureSuperAdminHandlers(mux *http.ServeMux) {
+// RegisterSuperAdminHandlers binds the super admin endpoints to the provided ServeMux.
+// It applies a Basic Auth middleware to protect the endpoints.
+func (p *Passkeys) RegisterSuperAdminHandlers(mux *http.ServeMux) {
 	// SuperAdmin: mTLS + Basic Auth protected
 	mux.Handle("/api/superadmin/create-token", superAdminMiddleware(p, http.HandlerFunc(p.handleCreateToken)))
 }
 
+// superAdminMiddleware provides HTTP Basic Authentication protection for the given handler.
+// It verifies the credentials against the SUPERADMIN_PASSWORD environment variable or defaults to "pepe".
 func superAdminMiddleware(p *Passkeys, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
@@ -35,7 +39,8 @@ func superAdminMiddleware(p *Passkeys, next http.Handler) http.Handler {
 	})
 }
 
-// handleCreateToken recives an email and generates a token for it, returning the url
+// handleCreateToken receives an email address and generates a random, secure invitation token.
+// The token and its expiration date (24 hours) are stored in the database.
 func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	email := r.URL.Query().Get("email")
 	if email == "" {
@@ -69,6 +74,9 @@ func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "token: %s\n", token)
 }
 
+// CreateInvitation securely associates a generated token and an expiration date with
+// an email address in the database, generating a unique WebAuthn user ID if one does not exist.
+// This function relies on a UPSERT operation to update the token for existing emails.
 func (p *Passkeys) CreateInvitation(email string, token string, expiry time.Time) error {
 
 	// Create userid as a random array of 32 bytes
