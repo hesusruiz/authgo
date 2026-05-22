@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -19,12 +18,27 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Config defines the configuration parameters for the Passkeys manager.
+type Config struct {
+	RPDisplayName           string   // Relying Party Display Name
+	RPID                    string   // Relying Party ID (domain name)
+	RPOrigins               []string // Allowed Relying Party origins
+	PathPrefix              string   // URL prefix group for the endpoints (defaults to "/passkeys")
+	DB                      *sql.DB  // Pre-configured database connection (optional)
+	DBDriver                string   // Driver name, e.g., "sqlite" (optional)
+	DBSourceName            string   // Connection string or file path (optional)
+	UnauthenticatedRedirect string   // Path to redirect unauthenticated users (optional)
+	SkipSchemaMigration     bool     // Set to true to disable automatic database table creation
+}
+
 // Passkeys is the primary manager for WebAuthn authentication, encapsulating the database connection,
 // the WebAuthn instance, and the session storage mechanism.
 type Passkeys struct {
 	db           *sql.DB
 	waInstance   *webauthn.WebAuthn
 	sessionStore *SessionStore
+	cfg          Config
+	isDBOwned    bool
 }
 
 // User represents an authenticated entity within the system. It implements the
@@ -43,17 +57,46 @@ func (u *User) WebAuthnDisplayName() string                { return u.email }
 func (u *User) WebAuthnCredentials() []webauthn.Credential { return u.credentials }
 func (u *User) WebAuthnIcon() string                       { return "" }
 
-// NewPasskeys initializes a new Passkeys manager. It sets up the WebAuthn
-// configuration, opens the SQLite database, executes the initial schema creation,
-// and returns the configured instance.
-func NewPasskeys() (*Passkeys, error) {
+// ID returns the user's ID.
+func (u *User) ID() []byte { return u.id }
+
+// Email returns the user's email address.
+func (u *User) Email() string { return u.email }
+
+// DisplayName returns the user's display name.
+func (u *User) DisplayName() string { return u.displayName }
+
+type contextKey string
+const userCtxKey contextKey = "user"
+
+// FromContext retrieves the authenticated User from the request context.
+func FromContext(ctx context.Context) *User {
+	u, _ := ctx.Value(userCtxKey).(*User)
+	return u
+}
+
+// NewPasskeys initializes a new Passkeys manager using the provided configuration.
+// It sets up the WebAuthn parameters, establishes or reuses the database connection,
+// performs schema initialization if required, and returns the configured manager.
+func NewPasskeys(cfg Config) (*Passkeys, error) {
+
+	// Apply default values if not provided
+	if cfg.RPDisplayName == "" {
+		cfg.RPDisplayName = "Admin Panel"
+	}
+	if cfg.RPID == "" {
+		cfg.RPID = "localhost"
+	}
+	if len(cfg.RPOrigins) == 0 {
+		cfg.RPOrigins = []string{"http://localhost:8080"}
+	}
 
 	requireResidentKey := true
 
 	waInstance, err := webauthn.New(&webauthn.Config{
-		RPDisplayName:         "Admin Panel",
-		RPID:                  "localhost",
-		RPOrigins:             []string{"http://localhost:8080"},
+		RPDisplayName:         cfg.RPDisplayName,
+		RPID:                  cfg.RPID,
+		RPOrigins:             cfg.RPOrigins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			AuthenticatorAttachment: protocol.Platform,
@@ -66,45 +109,80 @@ func NewPasskeys() (*Passkeys, error) {
 		return nil, errl.Error(err)
 	}
 
-	db, err := sql.Open("sqlite", "./authn.db")
-	if err != nil {
-		return nil, errl.Error(err)
+	var db *sql.DB
+	var isDBOwned bool
+
+	if cfg.DB != nil {
+		db = cfg.DB
+	} else {
+		driver := cfg.DBDriver
+		if driver == "" {
+			driver = "sqlite"
+		}
+		source := cfg.DBSourceName
+		if source == "" {
+			source = "./authn.db"
+		}
+		db, err = sql.Open(driver, source)
+		if err != nil {
+			return nil, errl.Error(err)
+		}
+		isDBOwned = true
 	}
 
-	_, err = db.ExecContext(context.Background(), `
-	CREATE TABLE IF NOT EXISTS users (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		email TEXT UNIQUE NOT NULL,
-		userid BLOB,
-		display_name TEXT,
-		invitation_token TEXT,
-		token_expiry DATETIME,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-		
-	CREATE TABLE IF NOT EXISTS credentials (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		user_email TEXT NOT NULL,
-		cred_type TEXT NOT NULL, 
-		cred_id TEXT UNIQUE NOT NULL, 
-		public_data BLOB NOT NULL,     
-		sign_count INTEGER DEFAULT 0,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY(user_email) REFERENCES users(email) ON DELETE CASCADE
-	);
-	`)
-	if err != nil {
-		log.Fatal(err)
+	if !cfg.SkipSchemaMigration {
+		_, err = db.ExecContext(context.Background(), `
+		CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			email TEXT UNIQUE NOT NULL,
+			userid BLOB,
+			display_name TEXT,
+			invitation_token TEXT,
+			token_expiry DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+			
+		CREATE TABLE IF NOT EXISTS credentials (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_email TEXT NOT NULL,
+			cred_type TEXT NOT NULL, 
+			cred_id TEXT UNIQUE NOT NULL, 
+			public_data BLOB NOT NULL,     
+			sign_count INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(user_email) REFERENCES users(email) ON DELETE CASCADE
+		);
+		`)
+		if err != nil {
+			if isDBOwned {
+				db.Close()
+			}
+			return nil, errl.Errorf("schema migration failed: %w", err)
+		}
 	}
 
 	passkeys := &Passkeys{
 		db:           db,
 		waInstance:   waInstance,
 		sessionStore: NewSessionStore(),
+		cfg:          cfg,
+		isDBOwned:    isDBOwned,
 	}
 
 	return passkeys, nil
 
+}
+
+// Close gracefully releases any active database connection opened by the manager
+// and terminates the background session eviction worker.
+func (p *Passkeys) Close() error {
+	if p.sessionStore != nil {
+		p.sessionStore.Close()
+	}
+	if p.isDBOwned && p.db != nil {
+		return p.db.Close()
+	}
+	return nil
 }
 
 // GetUserByEmail looks up a user in the SQLite database by their email address.

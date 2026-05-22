@@ -12,13 +12,6 @@ import (
 	"github.com/hesusruiz/utils/errl"
 )
 
-// RegisterSuperAdminHandlers binds the super admin endpoints to the provided ServeMux.
-// It applies a Basic Auth middleware to protect the endpoints.
-func (p *Passkeys) RegisterSuperAdminHandlers(mux *http.ServeMux) {
-	// SuperAdmin: mTLS + Basic Auth protected
-	mux.Handle("/api/superadmin/create-token", superAdminMiddleware(p, http.HandlerFunc(p.handleCreateToken)))
-}
-
 // superAdminMiddleware provides HTTP Basic Authentication protection for the given handler.
 // It verifies the credentials against the SUPERADMIN_PASSWORD environment variable or defaults to "pepe".
 func superAdminMiddleware(p *Passkeys, next http.Handler) http.Handler {
