@@ -29,6 +29,7 @@ type Config struct {
 	DBSourceName            string   // Connection string or file path (optional)
 	UnauthenticatedRedirect string   // Path to redirect unauthenticated users (optional)
 	SkipSchemaMigration     bool     // Set to true to disable automatic database table creation
+	HomePage                string   // Default redirect URL upon successful login/registration if 'next' is empty (defaults to "/")
 }
 
 // Passkeys is the primary manager for WebAuthn authentication, encapsulating the database connection,
@@ -90,6 +91,9 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 	}
 	if len(cfg.RPOrigins) == 0 {
 		cfg.RPOrigins = []string{"http://localhost:8080"}
+	}
+	if cfg.HomePage == "" {
+		cfg.HomePage = "/"
 	}
 
 	requireResidentKey := true

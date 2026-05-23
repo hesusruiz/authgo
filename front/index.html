@@ -44,7 +44,7 @@
 
                     <h2>Login with your passkey</h2>
                     <div class="w3-section">
-                        <button onclick="startLogin()" class="w3-button w3-round-large w3-blue">Login with
+                        <button onclick="performLogin()" class="w3-button w3-round-large w3-blue">Login with
                             Passkey</button>
                     </div>
 
@@ -64,7 +64,7 @@
                         </p>
 
                         <div class="w3-section">
-                            <button onclick="startRegister()" class="w3-button w3-round-large w3-blue">Register
+                            <button onclick="performRegister()" class="w3-button w3-round-large w3-blue">Register
                                 Passkey</button>
                         </div>
                     </div>
@@ -99,12 +99,20 @@
          * @property {string} sessionid
          */
 
-        async function startLogin() {
+        async function performLogin() {
             debugger;
-            const res = await fetch('api/login/begin');
+            const urlParams = new URLSearchParams(window.location.search);
+            const nextUrl = urlParams.get('next') || '';
+
+            const res = await fetch('api/login/begin?next=' + encodeURIComponent(nextUrl));
 
             /** @type {startLoginResponse} */
             const resJSON = await res.json();
+
+            if (resJSON.authenticated) {
+                window.location.href = resJSON.redirectUrl;
+                return;
+            }
 
             const credentialAssertion = resJSON.credentialAssertion;
             const publicKey = credentialAssertion.publicKey;
@@ -127,8 +135,7 @@
             debugger;
             console.log(assertion)
 
-
-            const finished = await fetch('api/login/finish?s=' + sessionid, {
+            const finished = await fetch('api/login/finish?s=' + sessionid + '&next=' + encodeURIComponent(nextUrl), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -137,23 +144,8 @@
             });
 
             if (finished.ok) {
-                const urlParams = new URLSearchParams(window.location.search);
-                let nextUrl = urlParams.get('next') || '/';
-
-                // Sanitize nextUrl to prevent open redirects (CWE-601)
-                // It must start with '/' and not start with '//' or '\' or have colons in the path
-                if (!nextUrl.startsWith('/') || nextUrl.startsWith('//') || nextUrl.startsWith('\\')) {
-                    nextUrl = '/';
-                } else if (nextUrl.includes(':')) {
-                    const posCol = nextUrl.indexOf(':');
-                    const posQM = nextUrl.indexOf('?');
-                    const posHash = nextUrl.indexOf('#');
-                    if ((posQM === -1 || posCol < posQM) && (posHash === -1 || posCol < posHash)) {
-                        nextUrl = '/';
-                    }
-                }
-
-                window.location.href = nextUrl;
+                const responseJSON = await finished.json();
+                window.location.href = responseJSON.data?.redirectUrl || '/';
             } else {
                 alert("verification failed")
             }
@@ -171,7 +163,7 @@
          * @property {string} sessionid
          */
 
-        async function startRegister() {
+        async function performRegister() {
 
             // Get the invitation code
             const tokenElem = document.getElementById("invitation_token");
@@ -182,8 +174,11 @@
 
             const token = tokenElem.value
 
+            const urlParams = new URLSearchParams(window.location.search);
+            const nextUrl = urlParams.get('next') || '';
+
             debugger;
-            const res = await fetch('api/register/begin?t=' + token);
+            const res = await fetch('api/register/begin?t=' + token + '&next=' + encodeURIComponent(nextUrl));
             if (!res.ok) {
                 alert("error calling beginRegistration")
                 return
@@ -191,6 +186,11 @@
 
             /** @type {startRegisterResponse} */
             const resJSON = await res.json();
+
+            if (resJSON.authenticated) {
+                window.location.href = resJSON.redirectUrl;
+                return;
+            }
 
             const credentialOptions = resJSON.credentialOptions;
             const publicKey = credentialOptions.publicKey;
@@ -210,7 +210,7 @@
                 throw error;
             }
 
-            const finished = await fetch('api/register/finish?t=' + token, {
+            const finished = await fetch('api/register/finish?t=' + token + '&next=' + encodeURIComponent(nextUrl), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -223,11 +223,12 @@
                 return
             }
 
-            window.location.href = "/";
+            const responseJSON = await finished.json();
+            window.location.href = responseJSON.data?.redirectUrl || '/';
         }
 
-        window.startRegister = startRegister
-        window.startLogin = startLogin
+        window.performRegister = performRegister
+        window.performLogin = performLogin
 
     </script>
 

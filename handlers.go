@@ -71,6 +71,21 @@ func (p *Passkeys) RegisterHandlers(mux *http.ServeMux) {
 // handleRegisterBegin initiates the WebAuthn registration process for a user.
 // It verifies the provided invitation token and returns the credential creation options.
 func (p *Passkeys) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
+	// Check if user is already authenticated
+	if session, err := p.sessionStore.GetSession(r); err == nil && session.User != nil {
+		nextParam := r.URL.Query().Get("next")
+		redirectURL := p.cfg.HomePage
+		if nextParam != "" && isSafeLocalRedirect(nextParam) {
+			redirectURL = nextParam
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"authenticated": true,
+			"redirectUrl":   redirectURL,
+		})
+		return
+	}
 
 	// The user must provide the invitation invitationToken that she received via email or any other mechanism
 	invitationToken := r.URL.Query().Get("t")
@@ -103,12 +118,12 @@ func (p *Passkeys) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type response struct {
+	type registerBeginResponse struct {
 		CredentialOptions *protocol.CredentialCreation `json:"credentialOptions"`
 		SessionID         string                       `json:"sessionid"`
 	}
 
-	resp := response{
+	resp := registerBeginResponse{
 		CredentialOptions: options,
 		SessionID:         session.Challenge,
 	}
@@ -176,7 +191,31 @@ func (p *Passkeys) handleRegisterFinish(w http.ResponseWriter, r *http.Request) 
 
 	fmt.Printf("Successfully registered key for %s\n", user.email)
 	p.sessionStore.DeleteSession(w, r)
-	w.WriteHeader(http.StatusOK)
+
+	_, err = p.sessionStore.CreateSession(w, nil, user, 3600)
+	if err != nil {
+		err = errl.Error(err)
+		slog.Error("finishing registration", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Tell the caller to where to redirect
+	nextParam := r.URL.Query().Get("next")
+	redirectURL := p.cfg.HomePage
+	if nextParam != "" && isSafeLocalRedirect(nextParam) {
+		redirectURL = nextParam
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]any{
+		"success": true,
+		"message": "Registration successful",
+		"data": map[string]string{
+			"redirectUrl": redirectURL,
+		},
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // getFileSystem returns an fs.FS to serve frontend files. In development mode
@@ -205,15 +244,24 @@ func getFileSystem() fs.FS {
 	return f
 }
 
-// handleLoginPage serves the initial HTML page containing the login and registration UI.
-func (p *Passkeys) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	// TODO: Load front/index.html (or wherever you put the login UI)
-	// It should contain a "Login with Passkey" button
-}
-
 // handleLoginBegin initiates the WebAuthn discoverable login (passkey) flow,
 // returning the credential assertion options to the client.
 func (p *Passkeys) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
+	// Check if user is already authenticated
+	if session, err := p.sessionStore.GetSession(r); err == nil && session.User != nil {
+		nextParam := r.URL.Query().Get("next")
+		redirectURL := p.cfg.HomePage
+		if nextParam != "" && isSafeLocalRedirect(nextParam) {
+			redirectURL = nextParam
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"authenticated": true,
+			"redirectUrl":   redirectURL,
+		})
+		return
+	}
 
 	// Get the challenge
 	assertion, session, err := p.waInstance.BeginDiscoverableLogin()
@@ -224,12 +272,12 @@ func (p *Passkeys) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type response struct {
+	type loginBeginResponse struct {
 		CredentialAssertion *protocol.CredentialAssertion `json:"credentialAssertion"`
 		SessionID           string                        `json:"sessionid"`
 	}
 
-	resp := response{
+	resp := loginBeginResponse{
 		CredentialAssertion: assertion,
 		SessionID:           session.Challenge,
 	}
@@ -323,8 +371,21 @@ func (p *Passkeys) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	nextParam := r.URL.Query().Get("next")
+	redirectURL := p.cfg.HomePage
+	if nextParam != "" && isSafeLocalRedirect(nextParam) {
+		redirectURL = nextParam
+	}
 
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]any{
+		"success": true,
+		"message": "Login successful",
+		"data": map[string]string{
+			"redirectUrl": redirectURL,
+		},
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // loadUserFromPasskey is an internal callback used by the WebAuthn library
@@ -455,7 +516,7 @@ func isSafeLocalRedirect(path string) bool {
 	// Unescape the path recursively (up to 5 levels to handle nested URL encoding)
 	// and reject if any level contains a backslash.
 	unescaped := path
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if strings.Contains(unescaped, "\\") {
 			return false
 		}
