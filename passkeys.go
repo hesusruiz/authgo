@@ -10,6 +10,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -67,6 +70,7 @@ func (u *User) Email() string { return u.email }
 func (u *User) DisplayName() string { return u.displayName }
 
 type contextKey string
+
 const userCtxKey contextKey = "user"
 
 // FromContext retrieves the authenticated User from the request context.
@@ -88,7 +92,16 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 		cfg.RPID = "localhost"
 	}
 	if len(cfg.RPOrigins) == 0 {
-		cfg.RPOrigins = []string{"http://localhost:8080"}
+
+		originsEnv := os.Getenv("AUTH_ORIGINS")
+		if originsEnv == "" {
+			originsEnv = "http://localhost:8080"
+		}
+
+		allowedOrigins := strings.Split(originsEnv, ",")
+		cfg.RPOrigins = allowedOrigins
+		slog.Info("RP Origins: %v", allowedOrigins[0])
+
 	}
 
 	requireResidentKey := true
