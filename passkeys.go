@@ -126,7 +126,7 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 		}
 		source := cfg.DBSourceName
 		if source == "" {
-			source = "./authn.db"
+			source = "./data/webauthn.db"
 		}
 		db, err = sql.Open(driver, source)
 		if err != nil {
