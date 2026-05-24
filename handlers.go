@@ -222,23 +222,21 @@ func (p *Passkeys) handleRegisterFinish(w http.ResponseWriter, r *http.Request) 
 // it serves directly from the 'front' directory to allow live reloads. In production,
 // it uses the embedded filesystem.
 func getFileSystem() fs.FS {
-	// Set to false when deploying to production
-	useLive := true
 
-	// Get the path to this specific .go file
-	_, thisFilePath, _, ok := runtime.Caller(0)
+	// Get the path to this specific .go file, and serve from the '/front' subdirectory if it exists
+	if _, thisFilePath, _, ok := runtime.Caller(0); ok {
 
-	if useLive && ok {
 		// The frontend files should be in the 'front' subdirectory
 		thisFileDir := filepath.Dir(thisFilePath)
-		// Join with the frontend folder
 		frontendPath := filepath.Join(thisFileDir, "front")
 
-		println("Development mode: Serving from", frontendPath)
-		return os.DirFS(frontendPath)
+		if _, err := os.Stat(frontendPath); err == nil {
+			println("Development mode: Serving from", frontendPath)
+			return os.DirFS(frontendPath)
+		}
 	}
 
-	// Production: Use embedded files
+	// Otherwise, serve from the embedded filesystem
 	// We use fs.Sub to strip the "front" prefix from the embed paths
 	f, _ := fs.Sub(embeddedFiles, "front")
 	return f
