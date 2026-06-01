@@ -87,7 +87,7 @@ func (p *Passkeys) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The user must provide the invitation invitationToken that she received via email or any other mechanism
+	// The user must provide the invitation Token that she received via email or any other mechanism
 	invitationToken := r.URL.Query().Get("t")
 	if invitationToken == "" {
 		slog.Error("no token provided")
