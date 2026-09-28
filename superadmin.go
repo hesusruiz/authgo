@@ -42,24 +42,16 @@ func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a random token as a string of 10 ASCII chars and numbers
-	b := make([]byte, 10)
-	_, err := rand.Read(b)
+	roles := r.URL.Query().Get("roles")
+	if roles == "" {
+		roles = "user"
+	}
+
+	token, err := p.InviteUser(email, roles)
 	if err != nil {
 		err = errl.Error(err)
 		slog.Error("error creating token", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	token := base64.URLEncoding.EncodeToString(b)
-
-	// Update user with token and expiry date (24 hours from now)
-	tokenExpiry := time.Now().Add(24 * time.Hour)
-	err = p.CreateInvitation(email, token, tokenExpiry)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("error getting invitation", "error", err)
-		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -70,7 +62,7 @@ func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 // CreateInvitation securely associates a generated token and an expiration date with
 // an email address in the database, generating a unique WebAuthn user ID if one does not exist.
 // This function relies on a UPSERT operation to update the token for existing emails.
-func (p *Passkeys) CreateInvitation(email string, token string, expiry time.Time) error {
+func (p *Passkeys) CreateInvitation(email string, roles string, token string, expiry time.Time) error {
 
 	// Create userid as a random array of 32 bytes
 	userID := make([]byte, 32)
@@ -78,15 +70,21 @@ func (p *Passkeys) CreateInvitation(email string, token string, expiry time.Time
 		return errl.Error(err)
 	}
 
+	if roles == "" {
+		roles = "user"
+	}
+
 	fmt.Println("creating invitation expiring on", expiry.Format(time.RFC1123))
 
 	_, err := p.db.Exec(
-		`INSERT INTO users (email, userid, invitation_token, token_expiry) 
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO users (email, roles, userid, invitation_token, token_expiry) 
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(email) DO UPDATE SET 
+		     roles = excluded.roles,
 		     invitation_token = excluded.invitation_token,
 		     token_expiry = excluded.token_expiry`,
 		email,
+		roles,
 		userID,
 		token,
 		expiry,
@@ -95,4 +93,23 @@ func (p *Passkeys) CreateInvitation(email string, token string, expiry time.Time
 		return errl.Error(err)
 	}
 	return nil
+}
+
+func (p *Passkeys) InviteUser(email string, roles string) (string, error) {
+	// Generate a random token as a string of 10 ASCII chars and numbers
+	b := make([]byte, 10)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", errl.Error(err)
+	}
+	token := base64.URLEncoding.EncodeToString(b)
+
+	// Update user with token and expiry date (24 hours from now)
+	tokenExpiry := time.Now().Add(24 * time.Hour)
+	err = p.CreateInvitation(email, roles, token, tokenExpiry)
+	if err != nil {
+		return "", errl.Error(err)
+	}
+
+	return token, nil
 }

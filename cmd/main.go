@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -19,6 +20,12 @@ func main() {
 		panic(err)
 	}
 	defer pk.Close()
+
+	invitation, err := pk.InviteUser("jesus@alastria.io", "admin:write")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Invitation:", invitation)
 
 	mux := http.NewServeMux()
 

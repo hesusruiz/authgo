@@ -405,9 +405,9 @@ func (p *Passkeys) loadUserFromPasskey(rawID []byte, userHandle []byte) (user we
 
 	// 1. Fetch the user row.
 	err = tx.QueryRowContext(ctx,
-		`SELECT userid, email FROM users WHERE userid = ?`,
+		`SELECT userid, email, COALESCE(roles, '') FROM users WHERE userid = ?`,
 		userHandle,
-	).Scan(&u.id, &u.email)
+	).Scan(&u.id, &u.email, &u.roles)
 	if err != nil {
 		return nil, errl.Errorf("GetUserWithCredentials: user lookup: %w", err)
 	}
@@ -448,9 +448,9 @@ func (p *Passkeys) handleLogout(w http.ResponseWriter, r *http.Request) {
 	p.redirectToLogin(w, r)
 }
 
-// RequirePasskey checks for the existence of a valid login session and redirects unauthenticated
+// RequirePasskey is a middleware that checks for the existence of a valid login session and redirects unauthenticated
 // requests to the configured login path or custom redirect URL, or returns 401 Unauthorized for API requests.
-// If authenticated, it retrieves the user details from the session (without hitting the database)
+// If authenticated, it retrieves the user details from the session
 // and injects the User struct into the request context.
 func (p *Passkeys) RequirePasskey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -538,6 +538,10 @@ func isSafeLocalRedirect(path string) bool {
 	return true
 }
 
+// isAPIRequest tries to deduce if the request is for an API, instead of from a human.
+// Returns true if the request path contains "/api/", the Accept header contains
+// "application/json" or the X-Requested-With header is "XMLHttpRequest".
+// This may be good enough for simple applications. For explicit use of APIs, use a different middleware..
 func isAPIRequest(r *http.Request) bool {
 	if strings.Contains(r.URL.Path, "/api/") {
 		return true

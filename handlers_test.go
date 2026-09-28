@@ -190,3 +190,46 @@ func TestRequirePasskey_ContentNegotiation(t *testing.T) {
 		t.Errorf("expected Page status 302, got %d", rrPage.Code)
 	}
 }
+
+func TestGetUserRoles(t *testing.T) {
+	pk, err := NewPasskeys(Config{
+		DBSourceName: ":memory:",
+		PathPrefix:   "/passkeys",
+	})
+	if err != nil {
+		t.Fatalf("failed to initialize Passkeys: %v", err)
+	}
+	defer pk.Close()
+
+	// Insert user directly with roles
+	_, err = pk.db.Exec(`INSERT INTO users (email, userid, roles) VALUES (?, ?, ?)`,
+		"alice@example.com", []byte("user-id-alice-1234567890123456"), "admin,editor")
+	if err != nil {
+		t.Fatalf("failed to insert user: %v", err)
+	}
+
+	// 1. Test GetUserByEmail
+	u1, err := pk.GetUserByEmail("alice@example.com")
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if u1.Roles() != "admin,editor" {
+		t.Errorf("expected roles %q, got %q", "admin,editor", u1.Roles())
+	}
+	if u1.Email() != "alice@example.com" {
+		t.Errorf("expected email %q, got %q", "alice@example.com", u1.Email())
+	}
+
+	// 2. Test GetUserWithCredentials
+	u2, err := pk.GetUserWithCredentials("alice@example.com")
+	if err != nil {
+		t.Fatalf("GetUserWithCredentials failed: %v", err)
+	}
+	if u2.Roles() != "admin,editor" {
+		t.Errorf("expected roles %q, got %q", "admin,editor", u2.Roles())
+	}
+	if u2.Email() != "alice@example.com" {
+		t.Errorf("expected email %q, got %q", "alice@example.com", u2.Email())
+	}
+}
+
