@@ -266,7 +266,7 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 	}
 
 	// 4. Default roles to '[]' for any users where roles is NULL or empty.
-	_, err = db.ExecContext(ctx, `UPDATE users SET roles = '[]' WHERE roles IS NULL OR trim(roles) = '';`)
+	_, err = db.ExecContext(ctx, `UPDATE users SET roles = '[{"type":"domain","domain":"goauth","function":"admin","action":["read"]}]' WHERE roles IS NULL OR roles = '[]';`)
 	if err != nil {
 		return errl.Errorf("schema migration failed to set default roles: %w", err)
 	}
