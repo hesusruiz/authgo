@@ -32,6 +32,9 @@ func hasColumn(t *testing.T, db *sql.DB, tableName, columnName string) bool {
 			return true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("failed during table info iteration for %s: %v", tableName, err)
+	}
 	return false
 }
 
@@ -109,23 +112,24 @@ func TestMigrateSchema_UpgradeExistingDB(t *testing.T) {
 	if email != "alice@example.com" || displayName != "Alice" {
 		t.Errorf("expected email 'alice@example.com' and display_name 'Alice', got email %q, display_name %q", email, displayName)
 	}
-	if !roles.Valid || roles.String != "admin:write" {
-		t.Errorf("expected roles 'admin:write' for existing user with null roles, got %q", roles.String)
+	if !roles.Valid || roles.String != "[]" {
+		t.Errorf("expected roles '[]' for existing user with null roles, got %q", roles.String)
 	}
 
 	// 6. Test updating roles for the migrated user
-	_, err = db.ExecContext(ctx, `UPDATE users SET roles = ? WHERE email = ?`, "admin,editor", "alice@example.com")
+	validPowers := `[{"type":"domain","domain":"goauth","function":"admin","action":["*"]}]`
+	_, err = db.ExecContext(ctx, `UPDATE users SET roles = ? WHERE email = ?`, validPowers, "alice@example.com")
 	if err != nil {
 		t.Fatalf("failed to update roles on migrated user: %v", err)
 	}
 
 	err = db.QueryRowContext(ctx, `SELECT roles FROM users WHERE email = ?`, "alice@example.com").Scan(&roles)
-	if err != nil || !roles.Valid || roles.String != "admin,editor" {
-		t.Errorf("expected roles 'admin,editor', got %v (err: %v)", roles, err)
+	if err != nil || !roles.Valid || roles.String != validPowers {
+		t.Errorf("expected roles %q, got %v (err: %v)", validPowers, roles, err)
 	}
 }
 
-// TestMigrateSchema_DefaultRolesForNullOrEmpty verifies that MigrateSchema defaults null or empty roles to 'admin:write'.
+// TestMigrateSchema_DefaultRolesForNullOrEmpty verifies that MigrateSchema defaults null or empty roles to '[]'.
 func TestMigrateSchema_DefaultRolesForNullOrEmpty(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -135,34 +139,44 @@ func TestMigrateSchema_DefaultRolesForNullOrEmpty(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Initial migration to create tables
-	if err := MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("initial MigrateSchema failed: %v", err)
+	// 1. Create a legacy table without NOT NULL / CHECK constraints to simulate existing unmigrated data
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			email TEXT UNIQUE NOT NULL,
+			display_name TEXT,
+			roles TEXT
+		);
+	`)
+	if err != nil {
+		t.Fatalf("failed to create test users table: %v", err)
 	}
 
-	// Insert test users with NULL, empty, and non-empty roles
+	validExistingPowers := `[{"type":"domain","domain":"goauth","function":"editor","action":["read"]}]`
+
+	// Insert test users with NULL, empty, and non-empty valid JSON roles
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO users (email, display_name, roles) VALUES
 		('null_roles@example.com', 'Null Roles', NULL),
 		('empty_roles@example.com', 'Empty Roles', ''),
-		('existing_roles@example.com', 'Existing Roles', 'editor:read');
-	`)
+		('existing_roles@example.com', 'Existing Roles', ?);
+	`, validExistingPowers)
 	if err != nil {
 		t.Fatalf("failed to insert test users: %v", err)
 	}
 
-	// Re-run migration
+	// Run migration to upgrade schema and set defaults
 	if err := MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("subsequent MigrateSchema failed: %v", err)
+		t.Fatalf("MigrateSchema failed: %v", err)
 	}
 
 	tests := []struct {
 		email         string
 		expectedRoles string
 	}{
-		{"null_roles@example.com", "admin:write"},
-		{"empty_roles@example.com", "admin:write"},
-		{"existing_roles@example.com", "editor:read"},
+		{"null_roles@example.com", "[]"},
+		{"empty_roles@example.com", "[]"},
+		{"existing_roles@example.com", validExistingPowers},
 	}
 
 	for _, tc := range tests {

@@ -25,6 +25,13 @@ import (
 //go:embed front/*
 var embeddedFiles embed.FS
 
+const pathRegisterBegin = "/api/register/begin"
+const pathRegisterFinish = "/api/register/finish"
+const pathLoginBegin = "/api/login/begin"
+const pathLoginFinish = "/api/login/finish"
+const pathLogout = "/api/logout"
+const pathSuperAdminCreateToken = "/api/superadmin/create-token"
+
 // RegisterHandlers binds the core frontend, registration, and login HTTP endpoints
 // to the provided ServeMux instance.
 func (p *Passkeys) RegisterHandlers(mux *http.ServeMux) {
@@ -34,37 +41,24 @@ func (p *Passkeys) RegisterHandlers(mux *http.ServeMux) {
 	}
 
 	prefix := p.cfg.PathPrefix
-	if prefix == "" {
-		prefix = "/passkeys"
-	}
-
-	// Clean and normalize the path prefix: ensure it starts with / and ends without a trailing slash
-	prefix = "/" + strings.Trim(prefix, "/")
-	if prefix == "/" {
-		prefix = ""
-	}
 
 	// Serve the frontend
 	fileSystem := getFileSystem()
-	if prefix != "" {
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, http.FileServer(http.FS(fileSystem))))
-	} else {
-		mux.Handle("/", http.FileServer(http.FS(fileSystem)))
-	}
+	mux.Handle(prefix+"/", http.StripPrefix(prefix, http.FileServer(http.FS(fileSystem))))
 
 	// Registration page and APIs
-	mux.HandleFunc(prefix+"/api/register/begin", p.handleRegisterBegin)
-	mux.HandleFunc(prefix+"/api/register/finish", p.handleRegisterFinish)
+	mux.HandleFunc(prefix+pathRegisterBegin, p.handleRegisterBegin)
+	mux.HandleFunc(prefix+pathRegisterFinish, p.handleRegisterFinish)
 
 	// Login page and APIs
-	mux.HandleFunc(prefix+"/api/login/begin", p.handleLoginBegin)
-	mux.HandleFunc(prefix+"/api/login/finish", p.handleLoginFinish)
+	mux.HandleFunc(prefix+pathLoginBegin, p.handleLoginBegin)
+	mux.HandleFunc(prefix+pathLoginFinish, p.handleLoginFinish)
 
 	// Logoff APIs
-	mux.HandleFunc(prefix+"/api/logout", p.handleLogout)
+	mux.HandleFunc(prefix+pathLogout, p.handleLogout)
 
 	// SuperAdmin: mTLS + Basic Auth protected
-	mux.Handle(prefix+"/api/superadmin/create-token", superAdminMiddleware(p, http.HandlerFunc(p.handleCreateToken)))
+	mux.Handle(prefix+pathSuperAdminCreateToken, superAdminMiddleware(p, http.HandlerFunc(p.handleCreateToken)))
 
 }
 
@@ -404,12 +398,18 @@ func (p *Passkeys) loadUserFromPasskey(rawID []byte, userHandle []byte) (user we
 	defer tx.Rollback() //nolint:errcheck
 
 	// 1. Fetch the user row.
+	var rolesJSON string
 	err = tx.QueryRowContext(ctx,
-		`SELECT userid, email, COALESCE(roles, '') FROM users WHERE userid = ?`,
+		`SELECT userid, email, roles FROM users WHERE userid = ?`,
 		userHandle,
-	).Scan(&u.id, &u.email, &u.roles)
+	).Scan(&u.id, &u.email, &rolesJSON)
 	if err != nil {
 		return nil, errl.Errorf("GetUserWithCredentials: user lookup: %w", err)
+	}
+	if rolesJSON != "" && rolesJSON != "[]" {
+		if err := json.Unmarshal([]byte(rolesJSON), &u.roles); err != nil {
+			return nil, errl.Errorf("GetUserWithCredentials: unmarshal roles: %w", err)
+		}
 	}
 
 	// 2. Fetch all passkey credentials credentials for this user, oldest first.

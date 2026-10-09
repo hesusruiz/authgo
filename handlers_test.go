@@ -1,8 +1,10 @@
 package passkeys
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -201,9 +203,22 @@ func TestGetUserRoles(t *testing.T) {
 	}
 	defer pk.Close()
 
+	expectedPowers := []OnePower{
+		{
+			Type:     "domain",
+			Domain:   "goauth",
+			Function: "admin",
+			Action:   []string{"read", "write"},
+		},
+	}
+	rolesJSON, err := json.Marshal(expectedPowers)
+	if err != nil {
+		t.Fatalf("failed to marshal expected powers: %v", err)
+	}
+
 	// Insert user directly with roles
 	_, err = pk.db.Exec(`INSERT INTO users (email, userid, roles) VALUES (?, ?, ?)`,
-		"alice@example.com", []byte("user-id-alice-1234567890123456"), "admin,editor")
+		"alice@example.com", []byte("user-id-alice-1234567890123456"), string(rolesJSON))
 	if err != nil {
 		t.Fatalf("failed to insert user: %v", err)
 	}
@@ -213,8 +228,8 @@ func TestGetUserRoles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUserByEmail failed: %v", err)
 	}
-	if u1.Roles() != "admin,editor" {
-		t.Errorf("expected roles %q, got %q", "admin,editor", u1.Roles())
+	if !reflect.DeepEqual(u1.Roles(), expectedPowers) {
+		t.Errorf("expected roles %+v, got %+v", expectedPowers, u1.Roles())
 	}
 	if u1.Email() != "alice@example.com" {
 		t.Errorf("expected email %q, got %q", "alice@example.com", u1.Email())
@@ -225,8 +240,8 @@ func TestGetUserRoles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUserWithCredentials failed: %v", err)
 	}
-	if u2.Roles() != "admin,editor" {
-		t.Errorf("expected roles %q, got %q", "admin,editor", u2.Roles())
+	if !reflect.DeepEqual(u2.Roles(), expectedPowers) {
+		t.Errorf("expected roles %+v, got %+v", expectedPowers, u2.Roles())
 	}
 	if u2.Email() != "alice@example.com" {
 		t.Errorf("expected email %q, got %q", "alice@example.com", u2.Email())

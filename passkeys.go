@@ -10,6 +10,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -49,7 +52,7 @@ type User struct {
 	email       string
 	displayName string
 	credentials []webauthn.Credential
-	roles       string
+	roles       []OnePower
 }
 
 // WebAuthn User Interface implementation
@@ -69,7 +72,7 @@ func (u *User) Email() string { return u.email }
 func (u *User) DisplayName() string { return u.displayName }
 
 // Roles returns the user's assigned roles.
-func (u *User) Roles() string { return u.roles }
+func (u *User) Roles() []OnePower { return u.roles }
 
 type contextKey string
 
@@ -98,6 +101,12 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 	}
 	if cfg.HomePage == "" {
 		cfg.HomePage = "/"
+	}
+
+	// Clean and normalize the path prefix: ensure it starts with / and ends without a trailing slash
+	cfg.PathPrefix = "/" + strings.Trim(cfg.PathPrefix, "/")
+	if cfg.PathPrefix == "/" {
+		cfg.PathPrefix = "/passkeys"
 	}
 
 	requireResidentKey := true
@@ -134,6 +143,12 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 		source := cfg.DBSourceName
 		if source == "" {
 			source = "./data/webauthn.db"
+			dir := path.Dir(source)
+			// Create the directory where the database will reside, if it not created
+			// It MUST be created before opening the database
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return nil, errl.Error(err)
+			}
 		}
 		db, err = sql.Open(driver, source)
 		if err != nil {
@@ -176,7 +191,7 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 		display_name TEXT,
 		invitation_token TEXT,
 		token_expiry DATETIME,
-		roles TEXT,
+		roles JSON NOT NULL DEFAULT '[]' CHECK (json_valid(roles)),
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -230,14 +245,14 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 
 	// 3. Add 'roles' column if not present in existing table.
 	if !hasRoles {
-		_, err = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN roles TEXT;`)
+		_, err = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN roles JSON NOT NULL DEFAULT '[]' CHECK (json_valid(roles));`)
 		if err != nil {
 			return errl.Errorf("schema migration failed to add roles column: %w", err)
 		}
 	}
 
-	// 4. Default roles to 'admin:write' for any users where roles is NULL or empty.
-	_, err = db.ExecContext(ctx, `UPDATE users SET roles = 'admin:write' WHERE roles IS NULL OR trim(roles) = '';`)
+	// 4. Default roles to '[]' for any users where roles is NULL or empty.
+	_, err = db.ExecContext(ctx, `UPDATE users SET roles = '[]' WHERE roles IS NULL OR trim(roles) = '';`)
 	if err != nil {
 		return errl.Errorf("schema migration failed to set default roles: %w", err)
 	}
@@ -261,9 +276,15 @@ func (p *Passkeys) Close() error {
 // It returns the User structure or an error if the user is not found.
 func (p *Passkeys) GetUserByEmail(email string) (*User, error) {
 	var u User
-	err := p.db.QueryRow("SELECT id, email, COALESCE(roles, '') FROM users WHERE email = ?", email).Scan(&u.id, &u.email, &u.roles)
+	var rolesJSON string
+	err := p.db.QueryRow("SELECT id, email, roles FROM users WHERE email = ?", email).Scan(&u.id, &u.email, &rolesJSON)
 	if err != nil {
 		return nil, errl.Error(err)
+	}
+	if rolesJSON != "" && rolesJSON != "[]" {
+		if err := json.Unmarshal([]byte(rolesJSON), &u.roles); err != nil {
+			return nil, errl.Errorf("GetUserByEmail: unmarshal roles: %w", err)
+		}
 	}
 	return &u, nil
 }
@@ -286,12 +307,18 @@ func (p *Passkeys) GetUserWithCredentials(email string) (*User, error) {
 
 	// 1. Fetch the user row.
 	var u User
+	var rolesJSON string
 	err = tx.QueryRowContext(ctx,
-		`SELECT userid, email, COALESCE(roles, '') FROM users WHERE email = ?`,
+		`SELECT userid, email, roles FROM users WHERE email = ?`,
 		email,
-	).Scan(&u.id, &u.email, &u.roles)
+	).Scan(&u.id, &u.email, &rolesJSON)
 	if err != nil {
 		return nil, errl.Errorf("GetUserWithCredentials: user lookup: %w", err)
+	}
+	if rolesJSON != "" && rolesJSON != "[]" {
+		if err := json.Unmarshal([]byte(rolesJSON), &u.roles); err != nil {
+			return nil, errl.Errorf("GetUserWithCredentials: unmarshal roles: %w", err)
+		}
 	}
 
 	// 2. Fetch all passkey credentials credentials for this user, oldest first.
@@ -359,15 +386,21 @@ func (p *Passkeys) UpdateUserInvitationToken(email, token string, expiry time.Ti
 func (p *Passkeys) GetInvitation(invitationToken string) (*User, error) {
 	var u User
 	var tokenExpiry sql.NullTime
+	var rolesJSON string
 	now := time.Now()
 
-	err := p.db.QueryRow("SELECT userid, email, token_expiry, COALESCE(roles, '') FROM users WHERE invitation_token = ?", invitationToken).Scan(&u.id, &u.email, &tokenExpiry, &u.roles)
+	err := p.db.QueryRow("SELECT userid, email, token_expiry, roles FROM users WHERE invitation_token = ?", invitationToken).Scan(&u.id, &u.email, &tokenExpiry, &rolesJSON)
 	// Return an error if error (includes record not found)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			err = errl.Errorf("invitation token not found")
 		}
 		return nil, errl.Error(err)
+	}
+	if rolesJSON != "" && rolesJSON != "[]" {
+		if err := json.Unmarshal([]byte(rolesJSON), &u.roles); err != nil {
+			return nil, errl.Errorf("GetInvitation: unmarshal roles: %w", err)
+		}
 	}
 
 	fmt.Println("now is", now.Format(time.RFC1123))
