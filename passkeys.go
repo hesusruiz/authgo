@@ -74,6 +74,20 @@ func (u *User) DisplayName() string { return u.displayName }
 // Roles returns the user's assigned roles.
 func (u *User) Roles() []OnePower { return u.roles }
 
+func (u *User) HasRole(role OnePower) bool {
+	for _, r := range u.roles {
+		if r.Includes(role) {
+			return true
+		}
+	}
+	return false
+}
+
+func (u *User) String() string {
+	b, _ := json.Marshal(u.roles)
+	return fmt.Sprintf("User: %s\nRoles: %s\n", u.email, string(b))
+}
+
 type contextKey string
 
 const userCtxKey contextKey = "user"

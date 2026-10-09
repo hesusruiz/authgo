@@ -39,8 +39,8 @@ func main() {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		fmt.Println("User roles:", user.Roles())
-		w.Write([]byte("Hello, " + user.Email() + "!"))
+		fmt.Println("User roles:", user.String())
+		w.Write([]byte("Hello, " + user.String()))
 	})))
 
 	server := &http.Server{
