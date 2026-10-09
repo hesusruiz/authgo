@@ -1,8 +1,10 @@
 package passkeys
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -190,3 +192,59 @@ func TestRequirePasskey_ContentNegotiation(t *testing.T) {
 		t.Errorf("expected Page status 302, got %d", rrPage.Code)
 	}
 }
+
+func TestGetUserRoles(t *testing.T) {
+	pk, err := NewPasskeys(Config{
+		DBSourceName: ":memory:",
+		PathPrefix:   "/passkeys",
+	})
+	if err != nil {
+		t.Fatalf("failed to initialize Passkeys: %v", err)
+	}
+	defer pk.Close()
+
+	expectedPowers := []OnePower{
+		{
+			Type:     "domain",
+			Domain:   "goauth",
+			Function: "admin",
+			Action:   []string{"read", "write"},
+		},
+	}
+	rolesJSON, err := json.Marshal(expectedPowers)
+	if err != nil {
+		t.Fatalf("failed to marshal expected powers: %v", err)
+	}
+
+	// Insert user directly with roles
+	_, err = pk.db.Exec(`INSERT INTO users (email, userid, roles) VALUES (?, ?, ?)`,
+		"alice@example.com", []byte("user-id-alice-1234567890123456"), string(rolesJSON))
+	if err != nil {
+		t.Fatalf("failed to insert user: %v", err)
+	}
+
+	// 1. Test GetUserByEmail
+	u1, err := pk.GetUserByEmail("alice@example.com")
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if !reflect.DeepEqual(u1.Roles(), expectedPowers) {
+		t.Errorf("expected roles %+v, got %+v", expectedPowers, u1.Roles())
+	}
+	if u1.Email() != "alice@example.com" {
+		t.Errorf("expected email %q, got %q", "alice@example.com", u1.Email())
+	}
+
+	// 2. Test GetUserWithCredentials
+	u2, err := pk.GetUserWithCredentials("alice@example.com")
+	if err != nil {
+		t.Fatalf("GetUserWithCredentials failed: %v", err)
+	}
+	if !reflect.DeepEqual(u2.Roles(), expectedPowers) {
+		t.Errorf("expected roles %+v, got %+v", expectedPowers, u2.Roles())
+	}
+	if u2.Email() != "alice@example.com" {
+		t.Errorf("expected email %q, got %q", "alice@example.com", u2.Email())
+	}
+}
+

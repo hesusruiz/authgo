@@ -2,11 +2,13 @@ package passkeys
 
 import (
 	"crypto/rand"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hesusruiz/utils/errl"
@@ -42,24 +44,49 @@ func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a random token as a string of 10 ASCII chars and numbers
-	b := make([]byte, 10)
-	_, err := rand.Read(b)
+	// domain is goauth by default
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		domain = "goauth"
+	}
+
+	// function is user by default
+	function := r.URL.Query().Get("function")
+	if function == "" {
+		function = "user"
+	}
+
+	// actions are specified in the URL as actions=act1,act2,act3
+	actions := r.URL.Query().Get("actions")
+	if actions == "" {
+		actions = "read"
+	}
+	actionArray := strings.Split(actions, ",")
+
+	pows := []OnePower{
+		{
+			Type:     "domain",
+			Domain:   "goauth",
+			Function: function,
+			Action:   actionArray,
+		},
+	}
+
+	// print the powers being created
+	b, err := json.Marshal(pows)
+	if err != nil {
+		err = errl.Error(err)
+		slog.Error("error marshalling powers", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fmt.Printf("Inviting user with powers: %s\n", string(b))
+
+	token, err := p.InviteUserPowers(email, pows)
 	if err != nil {
 		err = errl.Error(err)
 		slog.Error("error creating token", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	token := base64.URLEncoding.EncodeToString(b)
-
-	// Update user with token and expiry date (24 hours from now)
-	tokenExpiry := time.Now().Add(24 * time.Hour)
-	err = p.CreateInvitation(email, token, tokenExpiry)
-	if err != nil {
-		err = errl.Error(err)
-		slog.Error("error getting invitation", "error", err)
-		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -67,10 +94,68 @@ func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "token: %s\n", token)
 }
 
-// CreateInvitation securely associates a generated token and an expiration date with
-// an email address in the database, generating a unique WebAuthn user ID if one does not exist.
-// This function relies on a UPSERT operation to update the token for existing emails.
-func (p *Passkeys) CreateInvitation(email string, token string, expiry time.Time) error {
+func (p *Passkeys) InviteUserPowers(email string, pows []OnePower) (string, error) {
+	// Generate a random token of 16 chars (digits 0-9, upper/lower ASCII letters, underscore)
+	const charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+	b := make([]byte, 16)
+	max := big.NewInt(int64(len(charset)))
+	for i := range b {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", errl.Error(err)
+		}
+		b[i] = charset[n.Int64()]
+	}
+	token := string(b)
+
+	// Update user with token and expiry date (24 hours from now)
+	tokenExpiry := time.Now().Add(24 * time.Hour)
+	err := p.CreateInvitationPowers(email, pows, token, tokenExpiry)
+	if err != nil {
+		return "", errl.Error(err)
+	}
+
+	return token, nil
+}
+
+// InviteAdmin creates an invitation for an admin with all powers.
+func (p *Passkeys) InviteAdmin(email string) (string, error) {
+	// Generate a random token of 16 chars (digits 0-9, upper/lower ASCII letters, underscore)
+	const charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+	b := make([]byte, 16)
+	max := big.NewInt(int64(len(charset)))
+	for i := range b {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", errl.Error(err)
+		}
+		b[i] = charset[n.Int64()]
+	}
+	token := string(b)
+
+	// Create the powers as a single element array of powers
+	pows := []OnePower{
+		{
+			Type:     "domain",
+			Domain:   "goauth",
+			Function: "admin",
+			Action:   []string{"*"},
+		},
+	}
+
+	// Update user with token and expiry date (72 hours from now)
+	tokenExpiry := time.Now().Add(72 * time.Hour)
+	err := p.CreateInvitationPowers(email, pows, token, tokenExpiry)
+	if err != nil {
+		return "", errl.Error(err)
+	}
+
+	return token, nil
+}
+
+// CreateInvitationPowers creates an invitation with the given powers, token and expiry date.
+// If no powers are provided, it creates an invitation for an admin with read access.
+func (p *Passkeys) CreateInvitationPowers(email string, pows []OnePower, token string, expiry time.Time) error {
 
 	// Create userid as a random array of 32 bytes
 	userID := make([]byte, 32)
@@ -78,15 +163,34 @@ func (p *Passkeys) CreateInvitation(email string, token string, expiry time.Time
 		return errl.Error(err)
 	}
 
+	if len(pows) == 0 {
+		pows = []OnePower{
+			{
+				Type:     "domain",
+				Domain:   "goauth",
+				Function: "user",
+				Action:   []string{"read"},
+			},
+		}
+	}
+
+	jsonPowers, err := json.Marshal(pows)
+	if err != nil {
+		return errl.Error(err)
+	}
+
 	fmt.Println("creating invitation expiring on", expiry.Format(time.RFC1123))
 
-	_, err := p.db.Exec(
-		`INSERT INTO users (email, userid, invitation_token, token_expiry) 
-		 VALUES (?, ?, ?, ?)
+	// TODO: change the field roles to powers with a JSON type
+	_, err = p.db.Exec(
+		`INSERT INTO users (email, roles, userid, invitation_token, token_expiry) 
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(email) DO UPDATE SET 
+		     roles = excluded.roles,
 		     invitation_token = excluded.invitation_token,
 		     token_expiry = excluded.token_expiry`,
 		email,
+		jsonPowers,
 		userID,
 		token,
 		expiry,
