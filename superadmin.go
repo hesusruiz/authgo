@@ -66,7 +66,7 @@ func (p *Passkeys) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	pows := []OnePower{
 		{
 			Type:     "domain",
-			Domain:   "goauth",
+			Domain:   domain,
 			Function: function,
 			Action:   actionArray,
 		},
@@ -108,8 +108,8 @@ func (p *Passkeys) InviteUserPowers(email string, pows []OnePower) (string, erro
 	}
 	token := string(b)
 
-	// Update user with token and expiry date (24 hours from now)
-	tokenExpiry := time.Now().Add(24 * time.Hour)
+	// Update user with token and expiry date (3 days from now)
+	tokenExpiry := time.Now().Add(72 * time.Hour)
 	err := p.CreateInvitationPowers(email, pows, token, tokenExpiry)
 	if err != nil {
 		return "", errl.Error(err)
@@ -174,10 +174,11 @@ func (p *Passkeys) CreateInvitationPowers(email string, pows []OnePower, token s
 		}
 	}
 
-	jsonPowers, err := json.Marshal(pows)
+	b, err := json.Marshal(pows)
 	if err != nil {
 		return errl.Error(err)
 	}
+	jsonPowers := string(b)
 
 	fmt.Println("creating invitation expiring on", expiry.Format(time.RFC1123))
 
