@@ -88,7 +88,7 @@ func TestMigrateSchema_UpgradeExistingDB(t *testing.T) {
 	}
 
 	// 3. Run MigrateSchema
-	if err := MigrateSchema(ctx, db); err != nil {
+	if err := CreateOrMigrateSchema(ctx, db); err != nil {
 		t.Fatalf("MigrateSchema failed on legacy db: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestMigrateSchema_DefaultRolesForNullOrEmpty(t *testing.T) {
 	}
 
 	// Run migration to upgrade schema and set defaults
-	if err := MigrateSchema(ctx, db); err != nil {
+	if err := CreateOrMigrateSchema(ctx, db); err != nil {
 		t.Fatalf("MigrateSchema failed: %v", err)
 	}
 
@@ -202,7 +202,7 @@ func TestMigrateSchema_FreshDB(t *testing.T) {
 
 	ctx := context.Background()
 
-	if err := MigrateSchema(ctx, db); err != nil {
+	if err := CreateOrMigrateSchema(ctx, db); err != nil {
 		t.Fatalf("MigrateSchema failed on fresh db: %v", err)
 	}
 
@@ -222,7 +222,7 @@ func TestMigrateSchema_Idempotency(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if err := MigrateSchema(ctx, db); err != nil {
+		if err := CreateOrMigrateSchema(ctx, db); err != nil {
 			t.Fatalf("iteration %d: MigrateSchema failed: %v", i, err)
 		}
 	}

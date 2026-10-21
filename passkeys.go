@@ -132,7 +132,7 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 		RPOrigins:             cfg.RPOrigins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			AuthenticatorAttachment: protocol.Platform,
+			AuthenticatorAttachment: protocol.CrossPlatform,
 			UserVerification:        protocol.VerificationRequired,
 			ResidentKey:             protocol.ResidentKeyRequirementRequired,
 			RequireResidentKey:      &requireResidentKey,
@@ -172,7 +172,7 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 	}
 
 	if !cfg.SkipSchemaMigration {
-		if err := MigrateSchema(context.Background(), db); err != nil {
+		if err := CreateOrMigrateSchema(context.Background(), db); err != nil {
 			if isDBOwned {
 				db.Close()
 			}
@@ -192,10 +192,10 @@ func NewPasskeys(cfg Config) (*Passkeys, error) {
 
 }
 
-// MigrateSchema applies database schema migrations to the provided database.
+// CreateOrMigrateSchema applies database schema migrations to the provided database.
 // It ensures that all required tables and columns exist, safely upgrading existing
 // databases in place without data loss.
-func MigrateSchema(ctx context.Context, db *sql.DB) error {
+func CreateOrMigrateSchema(ctx context.Context, db *sql.DB) error {
 	// 1. Ensure base tables exist with latest schema definitions.
 	_, err := db.ExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS users (
@@ -234,17 +234,17 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 
 		for rows.Next() {
 			var (
-				cid          int
-				name         string
+				colid        int
+				colname      string
 				colType      string
 				notNull      int
 				defaultValue sql.NullString
 				pk           int
 			)
-			if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			if err := rows.Scan(&colid, &colname, &colType, &notNull, &defaultValue, &pk); err != nil {
 				return false, errl.Errorf("schema migration failed to scan table info: %w", err)
 			}
-			if name == "roles" {
+			if colname == "roles" {
 				return true, nil
 			}
 		}
@@ -263,12 +263,13 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errl.Errorf("schema migration failed to add roles column: %w", err)
 		}
-	}
 
-	// 4. Default roles to '[]' for any users where roles is NULL or empty.
-	_, err = db.ExecContext(ctx, `UPDATE users SET roles = '[{"type":"domain","domain":"goauth","function":"admin","action":["read"]}]' WHERE roles IS NULL OR roles = '[]';`)
-	if err != nil {
-		return errl.Errorf("schema migration failed to set default roles: %w", err)
+		// 4. Set roles for all users
+		_, err = db.ExecContext(ctx, `UPDATE users SET roles = '[{"type":"domain","domain":"onboardng","function":"admin","action":["read"]}]';`)
+		if err != nil {
+			return errl.Errorf("schema migration failed to set default roles: %w", err)
+		}
+
 	}
 
 	return nil
