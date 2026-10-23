@@ -221,55 +221,7 @@ func CreateOrMigrateSchema(ctx context.Context, db *sql.DB) error {
 	);
 	`)
 	if err != nil {
-		return errl.Errorf("schema migration failed to create tables: %w", err)
-	}
-
-	// 2. Check if 'roles' column exists in 'users' table (for databases created with older schema).
-	hasRoles, err := func() (bool, error) {
-		rows, err := db.QueryContext(ctx, `PRAGMA table_info(users)`)
-		if err != nil {
-			return false, errl.Errorf("schema migration failed to inspect table info: %w", err)
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var (
-				colid        int
-				colname      string
-				colType      string
-				notNull      int
-				defaultValue sql.NullString
-				pk           int
-			)
-			if err := rows.Scan(&colid, &colname, &colType, &notNull, &defaultValue, &pk); err != nil {
-				return false, errl.Errorf("schema migration failed to scan table info: %w", err)
-			}
-			if colname == "roles" {
-				return true, nil
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return false, errl.Errorf("schema migration table info iteration error: %w", err)
-		}
-		return false, nil
-	}()
-	if err != nil {
-		return err
-	}
-
-	// 3. Add 'roles' column if not present in existing table.
-	if !hasRoles {
-		_, err = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN roles JSON NOT NULL DEFAULT '[]' CHECK (json_valid(roles));`)
-		if err != nil {
-			return errl.Errorf("schema migration failed to add roles column: %w", err)
-		}
-
-		// 4. Set roles for all users
-		_, err = db.ExecContext(ctx, `UPDATE users SET roles = '[{"type":"domain","domain":"onboardng","function":"admin","action":["read"]}]';`)
-		if err != nil {
-			return errl.Errorf("schema migration failed to set default roles: %w", err)
-		}
-
+		return errl.Errorf("failed to create tables: %w", err)
 	}
 
 	return nil
