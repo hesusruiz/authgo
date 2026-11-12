@@ -454,6 +454,19 @@ func (p *Passkeys) handleLogout(w http.ResponseWriter, r *http.Request) {
 // and injects the User struct into the request context.
 func (p *Passkeys) RequirePasskey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bypass authentication if in testing, inserting a dummy user
+		slog.Info("NoAuth", "value", p.cfg.DisableAuth)
+		if p.cfg.DisableAuth {
+			u := &User{
+				id:    []byte("dummyuser"),
+				email: "dummy@example.com",
+			}
+			ctx := context.WithValue(r.Context(), userCtxKey, u)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Check if there is a session with a user, and redirect to Login if not
 		session, err := p.sessionStore.GetSession(r)
 		if err != nil || session.User == nil {
 			if isAPIRequest(r) {
@@ -466,6 +479,7 @@ func (p *Passkeys) RequirePasskey(next http.Handler) http.Handler {
 			return
 		}
 
+		// Authenticated user, pass control to next handler
 		ctx := context.WithValue(r.Context(), userCtxKey, session.User)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

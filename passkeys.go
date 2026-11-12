@@ -33,6 +33,7 @@ type Config struct {
 	UnauthenticatedRedirect string   // Path to redirect unauthenticated users (optional)
 	SkipSchemaMigration     bool     // Set to true to disable automatic database table creation
 	HomePage                string   // Default redirect URL upon successful login/registration if 'next' is empty (defaults to "/")
+	DisableAuth             bool     // ONLY FOR TESTING: disable authentication to facilitate testing pages
 }
 
 // Passkeys is the primary manager for WebAuthn authentication, encapsulating the database connection,
